@@ -1,0 +1,216 @@
+name: 📦 Build Nora Tunnel APK
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    name: 📱 Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      # ==== CHECKOUT ====
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # ==== JAVA 17 ====
+      - name: ☕ Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      # ==== NODE.JS 20 ====
+      - name: ⚙️ Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      # ==== INSTALL NPM ====
+      - name: 📦 Install NPM Dependencies
+        run: npm ci
+
+      # ==== BUILD WEB ====
+      - name: 🌐 Build Web App (Vite)
+        run: npm run build
+
+      - name: ✅ Verify Web Build
+        run: |
+          echo "Web build output:"
+          ls -la dist/
+          echo "Size: $(du -sh dist/ | cut -f1)"
+
+      # ==== ANDROID SDK via Java action ====
+      - name: 🤖 Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 📦 Install Android Components
+        run: |
+          yes | sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+
+      # ==== GRADLE SETUP ====
+      - name: 🤖 Setup Gradle 8.5
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.5'
+
+      # ==== CAPACITOR: ADD ANDROID ====
+      - name: 📱 Add Capacitor Android Platform
+        run: |
+          echo "Adding Android platform via Capacitor..."
+          npx cap add android
+          echo "✅ Android platform added"
+
+      # ==== CAPACITOR: COPY + SYNC ====
+      - name: 📱 Sync Capacitor Android
+        run: |
+          npx cap copy android
+          npx cap sync android
+          echo "✅ Capacitor synced"
+
+      # ==== DEBUG: Show Android Structure ====
+      - name: 🔍 Debug - Android Project Structure
+        run: |
+          echo "=== android/ top level ==="
+          ls -la android/ || echo "android/ not found!"
+          echo ""
+          echo "=== app/ ==="
+          ls -la android/app/ 2>/dev/null || echo "app/ not found!"
+          echo ""
+          echo "=== gradle wrapper ==="
+          ls -la android/gradle/wrapper/ 2>/dev/null || echo "wrapper not found!"
+          echo ""
+          echo "=== gradlew ==="
+          ls -la android/gradlew 2>/dev/null || echo "gradlew not found!"
+          echo ""
+          echo "=== Java source ==="
+          find android/app/src -name "*.java" -o -name "*.kt" 2>/dev/null || true
+          echo ""
+          echo "=== AndroidManifest.xml ==="
+          cat android/app/src/main/AndroidManifest.xml 2>/dev/null || true
+          echo ""
+          echo "=== app/build.gradle (first 30 lines) ==="
+          head -30 android/app/build.gradle 2>/dev/null || true
+
+      # ==== PATCH ANDROID PROJECT ====
+      - name: 🔧 Patch Android Project
+        run: |
+          chmod +x scripts/patch-android.sh
+          bash scripts/patch-android.sh
+
+      # ==== ENSURE GRADLEW EXECUTABLE ====
+      - name: 🔧 Make gradlew executable
+        run: chmod +x android/gradlew
+
+      # ==== VERIFY GRADLE WRAPPER JAR ====
+      - name: ✅ Verify Gradle Wrapper
+        run: |
+          WRAPPER_JAR="android/gradle/wrapper/gradle-wrapper.jar"
+          if [ -f "$WRAPPER_JAR" ]; then
+            echo "✅ gradle-wrapper.jar exists ($(du -h $WRAPPER_JAR | cut -f1))"
+          else
+            echo "⚠️ gradle-wrapper.jar MISSING — generating with Gradle..."
+            cd android
+            gradle wrapper --gradle-version 8.5
+            cd ..
+            if [ -f "$WRAPPER_JAR" ]; then
+              echo "✅ gradle-wrapper.jar generated successfully"
+            else
+              echo "❌ Could not generate gradle-wrapper.jar!"
+              exit 1
+            fi
+          fi
+
+      # ==== BUILD DEBUG APK ====
+      - name: 🔨 Build Debug APK
+        working-directory: android
+        run: |
+          echo "Starting Gradle build..."
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      # ==== FIND APK ====
+      - name: 🔍 Find APK files
+        if: always()
+        run: |
+          echo "=== All APK files ==="
+          find android/ -name "*.apk" -exec ls -la {} \; 2>/dev/null || echo "No APKs found"
+          echo ""
+          echo "=== Build outputs ==="
+          ls -la android/app/build/outputs/apk/debug/ 2>/dev/null || true
+
+      # ==== RENAME + UPLOAD ====
+      - name: 📝 Prepare APK for Upload
+        run: |
+          APK_SRC="android/app/build/outputs/apk/debug/app-debug.apk"
+          if [ -f "$APK_SRC" ]; then
+            SIZE=$(du -h "$APK_SRC" | cut -f1)
+            echo "✅ Debug APK found! Size: $SIZE"
+            cp "$APK_SRC" nora-tunnel-v1.0.0-debug.apk
+          else
+            echo "❌ APK not found at $APK_SRC"
+            find android/ -name "*.apk" 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: 📤 Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nora-tunnel-v1.0.0-debug
+          path: nora-tunnel-v1.0.0-debug.apk
+          retention-days: 90
+
+      # ==== BUILD SUMMARY ====
+      - name: 📊 Build Summary
+        if: always()
+        run: |
+          echo "## 🛡️ NORA TUNNEL — APK Build" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f "nora-tunnel-v1.0.0-debug.apk" ]; then
+            SIZE=$(du -h nora-tunnel-v1.0.0-debug.apk | cut -f1)
+            echo "### ✅ Build Successful!" >> $GITHUB_STEP_SUMMARY
+            echo "**APK Size:** $SIZE" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Build Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| App | NORA TUNNEL |" >> $GITHUB_STEP_SUMMARY
+          echo "| Package | com.nora.tunnel |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | 1.0.0 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Min Android | 10 (API 29) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target Android | 14 (API 34) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📲 Install" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download **nora-tunnel-v1.0.0-debug** artifact" >> $GITHUB_STEP_SUMMARY
+          echo "2. Transfer to Android device" >> $GITHUB_STEP_SUMMARY
+          echo "3. Enable unknown sources" >> $GITHUB_STEP_SUMMARY
+          echo "4. Install APK 📱" >> $GITHUB_STEP_SUMMARY
+
+      # ==== GITHUB RELEASE ====
+      - name: 🚀 Create Release
+        if: success() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0-build${{ github.run_number }}
+          name: 🛡️ NORA TUNNEL v1.0.0 (Build ${{ github.run_number }})
+          body: |
+            🛡️ **NORA TUNNEL** — Secure. Private. Connected.
+
+            Build #${{ github.run_number }} • Commit ${{ github.sha }}
+
+            ## 📲 Install
+            1. Download APK below
+            2. Transfer to Android device
+            3. Enable "Install from unknown sources"
+            4. Install
+
+            `com.nora.tunnel` • Android 10+ • API 29+
+          files: nora-tunnel-v1.0.0-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
